@@ -1,0 +1,5 @@
+streamlit
+yfinance
+feedparser
+google-generativeai
+matplotlib
