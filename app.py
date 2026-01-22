@@ -4,330 +4,294 @@ import feedparser
 import google.generativeai as genai
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime
 from time import mktime
 
 # ==========================================
-# 1. 页面配置与样式
+# 0. 全局配置与常量
 # ==========================================
 st.set_page_config(
-    page_title="LNG Trading Dashboard Pro",
-    page_icon="🚢",
+    page_title="LNG Trading Dashboard V3",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 自定义 CSS：增强卡片效果和字体
+# 估算参数
+TTF_CONVERSION_FACTOR = 0.31  # 粗略换算: (1 EUR ≈ 1.05 USD) / (1 MWh ≈ 3.412 MMBtu) ≈ 0.307
+ARB_COST_ESTIMATE = 8.0       # USD/MMBtu (包含液化费、海运费、再气化费)
+
+# 自定义 CSS (V3版 - 更紧凑、更专业)
 st.markdown("""
     <style>
     .metric-container {
         background-color: #ffffff;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        padding: 12px;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         border: 1px solid #f0f0f0;
         text-align: center;
     }
-    .news-card {
+    .metric-label { font-size: 0.9em; color: #666; font-weight: 500; }
+    .metric-value { font-size: 1.6em; font-weight: 700; color: #333; margin: 5px 0; }
+    .metric-delta { font-size: 0.9em; font-weight: 600; }
+    
+    .arb-box-open {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        color: #155724;
         padding: 15px;
         border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        margin-bottom: 12px;
-        background-color: white;
-        transition: transform 0.2s;
+        text-align: center;
+        margin-bottom: 20px;
     }
-    .news-card:hover {
-        background-color: #f9f9f9;
-        border-color: #ccc;
+    .arb-box-closed {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        color: #721c24;
+        padding: 15px;
+        border-radius: 8px;
+        text-align: center;
+        margin-bottom: 20px;
     }
-    .source-tag {
-        font-size: 0.75em;
-        background-color: #eef;
-        color: #44a;
-        padding: 2px 6px;
-        border-radius: 4px;
-        margin-right: 5px;
+    .news-item {
+        border-bottom: 1px solid #eee;
+        padding: 10px 0;
     }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. Sidebar: 配置
+# 1. Sidebar: 设置
 # ==========================================
-st.sidebar.title("🚢 LNG Pro Dashboard")
-st.sidebar.write("Global Gas Market Intelligence")
-
-api_key = st.sidebar.text_input("Google API Key", type="password", placeholder="Enter Gemini Key for AI Analysis")
-
+st.sidebar.header("⚙️ Configuration")
+api_key = st.sidebar.text_input("Google Gemini API Key", type="password")
 ai_enabled = False
 if api_key:
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro') # 验证初始化
         ai_enabled = True
-        st.sidebar.success("✅ AI Engine Active")
-    except Exception as e:
-        st.sidebar.error(f"❌ API Key Invalid")
+        st.sidebar.success("AI Analytics: ON")
+    except:
+        st.sidebar.error("API Key Invalid")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Data Sources")
-st.sidebar.info(
-    """
-    **Prices:** Yahoo Finance
-    - Henry Hub (NG=F)
-    - Dutch TTF (TTF=F)
-    - JKM (JKM=F)
-    
-    **News Feeds:**
-    - Reuters Energy
-    - OilPrice.com
-    - LNG Prime
-    - Natural Gas Intel
-    """
-)
+st.sidebar.markdown(f"""
+**Arb Calculation Logic:**
+- **Cost Est:** ${ARB_COST_ESTIMATE} / MMBtu
+- **Conv Factor:** {TTF_CONVERSION_FACTOR}
+- *Formula: (TTF * {TTF_CONVERSION_FACTOR}) - HH*
+""")
 
 # ==========================================
-# 3. 核心逻辑函数
+# 2. 数据处理核心
 # ==========================================
-
-@st.cache_data(ttl=600) # 缓存10分钟
+@st.cache_data(ttl=300)
 def get_market_data():
-    """获取 HH, TTF, JKM 数据"""
-    tickers = ['NG=F', 'TTF=F', 'JKM=F']
-    
+    """获取 HH, TTF, JKM, Brent"""
+    tickers = ['NG=F', 'TTF=F', 'JKM=F', 'BZ=F']
     try:
-        # 批量下载数据
         data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
+        res = {}
         
-        processed_data = {}
-        
-        # 辅助函数：安全提取 Close 数据
-        def extract_close(ticker_symbol):
-            if ticker_symbol in data:
-                df = data[ticker_symbol]
-                if not df.empty and 'Close' in df.columns:
-                    # 移除空值
-                    series = df['Close'].dropna()
-                    if not series.empty:
-                        return series
+        def get_series(symbol):
+            if symbol in data and not data[symbol]['Close'].dropna().empty:
+                return data[symbol]['Close'].dropna()
             return None
 
-        # 1. Henry Hub
-        processed_data['HH'] = extract_close('NG=F')
+        res['HH'] = get_series('NG=F')
+        res['TTF'] = get_series('TTF=F')
+        res['JKM'] = get_series('JKM=F')
+        res['BRENT'] = get_series('BZ=F')
         
-        # 2. Dutch TTF
-        processed_data['TTF'] = extract_close('TTF=F')
-        
-        # 3. JKM (经常失败，单独处理逻辑在UI层判断)
-        processed_data['JKM'] = extract_close('JKM=F')
-        
-        return processed_data
-        
+        return res
     except Exception as e:
-        st.error(f"Data Feed Connection Error: {e}")
         return {}
 
-def parse_rss_feed():
-    """RSS 矩阵抓取与聚合"""
-    rss_sources = [
-        {"name": "Reuters", "url": "http://feeds.reuters.com/reuters/energyNews"},
-        {"name": "OilPrice", "url": "https://oilprice.com/rss/main"},
-        {"name": "LNG Prime", "url": "https://lngprime.com/feed/"},
-        {"name": "NG Intel", "url": "https://www.naturalgasintel.com/feed/"}
+def calculate_arbitrage(hh_series, ttf_series):
+    """计算套利价差序列"""
+    if hh_series is None or ttf_series is None:
+        return None, 0, 0
+    
+    # 对齐日期索引
+    df = pd.DataFrame({'HH': hh_series, 'TTF': ttf_series}).dropna()
+    
+    if df.empty:
+        return None, 0, 0
+
+    # 换算 TTF (EUR/MWh -> USD/MMBtu)
+    df['TTF_USD'] = df['TTF'] * TTF_CONVERSION_FACTOR
+    
+    # 计算价差 (Spread)
+    df['Spread'] = df['TTF_USD'] - df['HH']
+    
+    latest_spread = df['Spread'].iloc[-1]
+    
+    # 计算当前是否盈利
+    is_open = latest_spread > ARB_COST_ESTIMATE
+    
+    return df, latest_spread, is_open
+
+def get_news_aggregated():
+    """RSS 聚合 (V3 简化版)"""
+    sources = [
+        ("Reuters", "http://feeds.reuters.com/reuters/energyNews"),
+        ("OilPrice", "https://oilprice.com/rss/main"),
+        ("LNG Prime", "https://lngprime.com/feed/")
     ]
-    
-    all_news = []
-    
-    for source in rss_sources:
+    items = []
+    for name, url in sources:
         try:
-            feed = feedparser.parse(source['url'])
-            for entry in feed.entries[:5]: # 每个源只取前5条，避免单个源刷屏
-                # 尝试解析时间，不同RSS源时间格式不同
-                published_time = datetime.now()
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                dt = datetime.now() # 简化时间处理
                 if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    published_time = datetime.fromtimestamp(mktime(entry.published_parsed))
-                elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                    published_time = datetime.fromtimestamp(mktime(entry.updated_parsed))
-                
-                all_news.append({
-                    "source": source['name'],
-                    "title": entry.title,
-                    "link": entry.link,
-                    "published_dt": published_time,
-                    "display_time": published_time.strftime("%Y-%m-%d %H:%M")
+                    dt = datetime.fromtimestamp(mktime(entry.published_parsed))
+                items.append({
+                    "source": name, "title": entry.title, 
+                    "link": entry.link, "dt": dt
                 })
-        except Exception:
-            continue
-            
-    # 按时间倒序排序 (最新的在最前)
-    all_news.sort(key=lambda x: x['published_dt'], reverse=True)
-    
-    # 只保留前10条
-    return all_news[:10]
+        except: continue
+    return sorted(items, key=lambda x: x['dt'], reverse=True)[:6]
 
-def analyze_news_ai(title):
-    """Gemini AI 分析"""
+def ai_analyze_market(spread, trend):
+    """简单的 AI 市场点评生成"""
     if not ai_enabled: return None
+    prompt = f"""
+    Current US-EU LNG Spread: ${spread:.2f}/MMBtu.
+    Arbitrage Cost Threshold: ${ARB_COST_ESTIMATE}/MMBtu.
+    Price Trend: {trend}.
+    As a trader, write a 1-sentence strategic action (e.g., "Fix cargoes now", "Wait for volatility").
+    """
     try:
-        prompt = f"""
-        作为LNG交易专家，分析此标题: "{title}"
-        1. 判断方向: Bullish(利多)/Bearish(利空)/Neutral(中性)
-        2. 影响力: 1-10分
-        3. 一句简短理由 (中文)
-        
-        格式: [方向] | [分数]/10 | [理由]
-        """
         model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except:
-        return None
+        return model.generate_content(prompt).text
+    except: return None
 
 # ==========================================
-# 4. 界面构建
+# 3. UI - Main Layout
 # ==========================================
+st.title("⚡ LNG Trading Dashboard V3.0")
 
-st.title("🚢 Global LNG Trading Dashboard")
-st.markdown("##### 实时跨区域天然气套利监控系统")
+data = get_market_data()
 
-# --- Section 1: 价格看板 (3 Columns) ---
-market_data = get_market_data()
+# --- ROW 1: Key Prices (Macro View) ---
+st.markdown("### 1. Market Overview (Price Action)")
+c1, c2, c3, c4 = st.columns(4)
 
-col1, col2, col3 = st.columns(3)
-
-def display_metric(col, label, series, unit, is_error=False, error_msg=""):
+def render_metric(col, title, series, prefix, color_invert=False):
     with col:
-        if is_error or series is None:
-            st.markdown(f"""
-            <div class="metric-container" style="border-left: 5px solid #ccc;">
-                <h4 style="margin:0; color:#666;">{label}</h4>
-                <p style="color: #d9534f; font-weight: bold; margin-top: 10px;">{error_msg}</p>
-            </div>
-            """, unsafe_allow_html=True)
+        if series is None:
+            st.markdown(f"""<div class="metric-container"><div class="metric-label">{title}</div><div style="color:#d9534f; margin-top:10px;">No Data</div></div>""", unsafe_allow_html=True)
         else:
-            latest = series.iloc[-1]
-            prev = series.iloc[-2] if len(series) > 1 else latest
-            delta = latest - prev
-            color = "#00c853" if delta >= 0 else "#ff5252" # 绿色涨，红色跌
+            cur = series.iloc[-1]
+            prev = series.iloc[-2] if len(series) > 1 else cur
+            chg = cur - prev
+            # 颜色逻辑: 涨红跌绿(CN) 还是 涨绿跌红(US)? 这里用国际惯例(涨绿)
+            color = "#00c853" if chg >= 0 else "#ff5252"
+            arrow = "▲" if chg >= 0 else "▼"
             
             st.markdown(f"""
-            <div class="metric-container" style="border-left: 5px solid {color};">
-                <h4 style="margin:0; color:#333;">{label}</h4>
-                <h2 style="margin:5px 0;">{unit}{latest:.3f}</h2>
-                <p style="color:{color}; margin:0;">{delta:+.3f}</p>
+            <div class="metric-container">
+                <div class="metric-label">{title}</div>
+                <div class="metric-value">{prefix}{cur:.2f}</div>
+                <div class="metric-delta" style="color:{color}">{arrow} {chg:.2f}</div>
             </div>
             """, unsafe_allow_html=True)
 
-# HH
-display_metric(col1, "Henry Hub (US)", market_data.get('HH'), "$")
-
-# TTF
-display_metric(col2, "Dutch TTF (EU)", market_data.get('TTF'), "€")
-
-# JKM
-# 专门针对 JKM 的逻辑：如果获取不到，显示特定信息
-jkm_series = market_data.get('JKM')
-if jkm_series is None:
-    display_metric(col3, "JKM (Asia)", None, "$", is_error=True, error_msg="数据源缺失 (需付费)")
-else:
-    display_metric(col3, "JKM (Asia)", jkm_series, "$")
+render_metric(c1, "Henry Hub (US)", data.get('HH'), "$")
+render_metric(c2, "Dutch TTF (EU)", data.get('TTF'), "€")
+render_metric(c3, "JKM (Asia)", data.get('JKM'), "$")
+render_metric(c4, "Brent Oil (Macro)", data.get('BRENT'), "$")
 
 st.markdown("---")
 
-# --- Section 2: 布局 (左侧图表，右侧新闻) ---
-chart_col, news_col = st.columns([2, 1], gap="medium")
+# --- ROW 2: Arbitrage Monitor (The Signal) ---
+st.markdown("### 2. US-EU Arbitrage Monitor")
 
-# --- 左侧: 专业双轴图表 ---
-with chart_col:
-    st.subheader("📊 跨大西洋价差分析 (HH vs TTF)")
-    
-    if market_data.get('HH') is not None and market_data.get('TTF') is not None:
-        hh_df = market_data['HH']
-        ttf_df = market_data['TTF']
-        
-        # 确保索引对齐（取交集日期）以绘图
-        common_index = hh_df.index.intersection(ttf_df.index)
-        
-        # 创建 Plotly 双轴图
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
+arb_df, current_spread, arb_open = calculate_arbitrage(data.get('HH'), data.get('TTF'))
 
-        # 添加 Henry Hub (左轴)
-        fig.add_trace(
-            go.Scatter(x=hh_df.index, y=hh_df.values, name="Henry Hub ($/MMBtu)", 
-                       line=dict(color='#1f77b4', width=2)),
-            secondary_y=False,
-        )
-
-        # 添加 TTF (右轴)
-        fig.add_trace(
-            go.Scatter(x=ttf_df.index, y=ttf_df.values, name="TTF (€/MWh)", 
-                       line=dict(color='#ff7f0e', width=2, dash='dot')),
-            secondary_y=True,
-        )
-
-        # 设置布局
-        fig.update_layout(
-            height=500,
-            title_text="Price Correlation: US vs Europe",
-            hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-
-        # 设置轴标题
-        fig.update_yaxes(title_text="<b>Henry Hub</b> ($/MMBtu)", secondary_y=False, showgrid=True, gridcolor='#eee')
-        fig.update_yaxes(title_text="<b>Dutch TTF</b> (€/MWh)", secondary_y=True, showgrid=False)
-
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.caption("注：左轴为 HH 价格 (USD)，右轴为 TTF 价格 (EUR)。量级差异较大，故采用双轴对比。")
+# 2.1 信号框 (Signal Box)
+if arb_df is not None:
+    if arb_open:
+        st.markdown(f"""
+        <div class="arb-box-open">
+            <h3>✅ ARBITRAGE WINDOW OPEN</h3>
+            <p>Net Spread: <b>${current_spread:.2f}</b> > Cost: ${ARB_COST_ESTIMATE}</p>
+            <p style="font-size:0.9em">Exporting US LNG to Europe is theoretically PROFITABLE.</p>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.warning("等待数据加载以生成图表...")
+        st.markdown(f"""
+        <div class="arb-box-closed">
+            <h3>❌ ARBITRAGE WINDOW CLOSED</h3>
+            <p>Net Spread: <b>${current_spread:.2f}</b> < Cost: ${ARB_COST_ESTIMATE}</p>
+            <p style="font-size:0.9em">Margins are negative. Wait for spread to widen.</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-# --- 右侧: AI 智能情报流 ---
-with news_col:
-    st.subheader("📰 全球情报矩阵")
-    st.write(f"Sources: Reuters, OilPrice, LNG Prime, NG Intel")
+    # 2.2 区域图表 (Spread Area Chart)
+    fig = go.Figure()
     
-    with st.spinner("正在聚合多源情报..."):
-        news_items = parse_rss_feed()
+    # 价差区域
+    fig.add_trace(go.Scatter(
+        x=arb_df.index, y=arb_df['Spread'],
+        fill='tozeroy',
+        mode='lines',
+        name='Spread (TTF-HH)',
+        line=dict(color='#1f77b4', width=2),
+        fillcolor='rgba(31, 119, 180, 0.2)'
+    ))
     
-    # 滚动容器
-    with st.container(height=600):
-        if not news_items:
-            st.warning("暂无更新或 RSS 连接超时")
-        
-        for news in news_items:
-            # 判断 AI 分析结果颜色
-            ai_result = None
-            sentiment_color = "#f0f2f6" # 默认灰色
-            
-            if ai_enabled:
-                ai_text = analyze_news_ai(news['title'])
-                if ai_text:
-                    if "Bullish" in ai_text: sentiment_color = "#e8f5e9" # 浅绿
-                    elif "Bearish" in ai_text: sentiment_color = "#ffebee" # 浅红
-                    ai_result = ai_text
+    # 成本线
+    fig.add_trace(go.Scatter(
+        x=[arb_df.index[0], arb_df.index[-1]],
+        y=[ARB_COST_ESTIMATE, ARB_COST_ESTIMATE],
+        mode='lines',
+        name='Cost Estimate ($8)',
+        line=dict(color='#ff7f0e', width=2, dash='dash')
+    ))
 
-            # 渲染卡片
-            with st.container():
-                st.markdown(f"""
-                <div class="news-card" style="border-left: 4px solid #1f77b4;">
-                    <div style="margin-bottom: 4px;">
-                        <span class="source-tag">{news['source']}</span>
-                        <span style="font-size:0.7em; color:grey;">{news['display_time']}</span>
-                    </div>
-                    <a href="{news['link']}" target="_blank" style="text-decoration:none; color:#2c3e50; font-weight:600;">
-                        {news['title']}
-                    </a>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if ai_result:
-                     st.markdown(f"""
-                        <div style="font-size: 0.85em; background-color: {sentiment_color}; padding: 8px; border-radius: 5px; margin-top: -8px; margin-bottom: 15px;">
-                            🤖 <b>AI Insight:</b> {ai_result}
-                        </div>
-                     """, unsafe_allow_html=True)
-                else:
-                    st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
+    fig.update_layout(
+        title="Gross Spread (TTF Converted - HH) vs Cost",
+        yaxis_title="USD / MMBtu",
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20),
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # AI 对套利的简评
+    if ai_enabled:
+        trend = "Widening" if current_spread > arb_df['Spread'].mean() else "Narrowing"
+        st.caption(f"🤖 **AI Strategy Note:** {ai_analyze_market(current_spread, trend)}")
+
+else:
+    st.warning("Insufficient data to calculate arbitrage spread (Check HH/TTF feeds).")
+
+st.markdown("---")
+
+# --- ROW 3: Intelligence & News ---
+st.markdown("### 3. Market Intelligence")
+
+news_items = get_news_aggregated()
+col_news_l, col_news_r = st.columns([1, 1])
+
+# 将新闻分两列展示，节省垂直空间
+for i, news in enumerate(news_items):
+    target_col = col_news_l if i % 2 == 0 else col_news_r
+    with target_col:
+        st.markdown(f"""
+        <div class="news-item">
+            <span style="font-size:0.75em; background:#eee; padding:2px 6px; border-radius:4px;">{news['source']}</span>
+            <span style="font-size:0.75em; color:gray;">{news['dt'].strftime('%m-%d %H:%M')}</span><br>
+            <a href="{news['link']}" target="_blank" style="text-decoration:none; color:#222; font-weight:600;">{news['title']}</a>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if ai_enabled:
+             # 简单的单条新闻情感分析 (可选，防止 Token 消耗过多)
+             pass 
+
+# Footer
+st.markdown("<br><div style='text-align:center; color:#ccc; font-size:0.8em;'>Powered by Streamlit, Yahoo Finance & Google Gemini</div>", unsafe_allow_html=True)
