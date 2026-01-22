@@ -1,305 +1,281 @@
 import streamlit as st
 import yfinance as yf
-import feedparser
-import google.generativeai as genai
 import pandas as pd
-import plotly.graph_objects as go
 import requests
-from datetime import datetime
-from time import mktime
+import feedparser
+from datetime import datetime, timedelta
+import google.generativeai as genai
 
-# ==========================================
-# 0. 全局配置 & 样式
-# ==========================================
-st.set_page_config(
-    page_title="LNG Trading Dashboard V4 Pro",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- 页面配置 ---
+st.set_page_config(page_title="LNG Trading Desk V4.5", layout="wide", page_icon="🚢")
 
-# 估算参数
-TTF_CONVERSION_FACTOR = 0.31  # EUR/MWh -> USD/MMBtu
-ARB_COST_ESTIMATE = 8.0       # USD/MMBtu
+# --- 侧边栏配置 ---
+st.sidebar.title("⚡ LNG Pro V4.5")
+st.sidebar.caption("Professional Trading Desk")
 
-st.markdown("""
-    <style>
-    .metric-container {
-        background-color: #ffffff;
-        padding: 12px;
-        border-radius: 8px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        border: 1px solid #f0f0f0;
-        text-align: center;
-    }
-    .metric-label { font-size: 0.85em; color: #666; font-weight: 500; text-transform: uppercase; }
-    .metric-value { font-size: 1.5em; font-weight: 700; color: #333; margin: 5px 0; }
-    .metric-sub { font-size: 0.8em; color: #888; }
+# API Keys
+with st.sidebar.expander("🔑 API Keys Setup", expanded=True):
+    gemini_key = st.sidebar.text_input("Google Gemini Key", type="password")
+    eia_key = st.sidebar.text_input("EIA API Key (US Storage)", type="password")
+    gie_key = st.sidebar.text_input("GIE API Key (EU Storage)", type="password")
+
+# 参数设置
+with st.sidebar.expander("⚙️ Arbitrage Settings", expanded=True):
+    freight_cost = st.sidebar.slider("Freight Cost ($/MMBtu)", 0.2, 3.0, 0.8, 0.1)
+    liquefaction_cost = st.sidebar.number_input("Liquefaction/Toll ($/MMBtu)", value=3.0)
     
-    .storage-card {
-        background-color: #f8f9fa;
-        border-left: 4px solid #1f77b4;
-        padding: 15px;
-        border-radius: 5px;
-    }
-    .arb-box-open {
-        background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724;
-        padding: 10px; border-radius: 8px; text-align: center; font-weight: bold;
-    }
-    .arb-box-closed {
-        background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24;
-        padding: 10px; border-radius: 8px; text-align: center; font-weight: bold;
-    }
-    .news-item { border-bottom: 1px solid #eee; padding: 8px 0; font-size: 0.9em; }
-    </style>
-""", unsafe_allow_html=True)
-
-# ==========================================
-# 1. Sidebar: Configuration
-# ==========================================
-st.sidebar.title("⚡ LNG Pro V4.0")
-st.sidebar.markdown("Professional Trading Desk")
-
-# --- API Keys ---
-st.sidebar.subheader("🔑 API Configuration")
-with st.sidebar.expander("API Keys Setup", expanded=True):
-    google_key = st.text_input("Google Gemini Key", type="password")
-    eia_key = st.text_input("EIA API Key (US Storage)", type="password", help="Get free key at eia.gov/opendata")
-    gie_key = st.text_input("GIE API Key (EU Storage)", type="password", help="Get key at agsi.gie.eu")
-
-# --- AI Init ---
-ai_enabled = False
-if google_key:
-    try:
-        genai.configure(api_key=google_key)
-        ai_enabled = True
-    except: pass
-
+# TTF 手动修正
 st.sidebar.markdown("---")
-st.sidebar.info("Data Sources:\n- Prices: Yahoo Finance\n- Storage: EIA (US) & AGSI (EU)\n- News: Reuters/OilPrice")
+manual_ttf = st.sidebar.number_input("Manual TTF Price (€/MWh)", value=0.0, help="如果自动获取失败，请在此手动输入")
 
-# ==========================================
-# 2. Data Functions (Prices, Storage, News)
-# ==========================================
+# --- 核心函数 ---
 
-# --- 2.1 Market Prices ---
-@st.cache_data(ttl=300)
 def get_market_data():
-    tickers = ['NG=F', 'TTF=F', 'JKM=F', 'BZ=F']
-    try:
-        data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
-        res = {}
-        def get_s(s): return data[s]['Close'].dropna() if s in data and not data[s]['Close'].dropna().empty else None
-        res['HH'], res['TTF'] = get_s('NG=F'), get_s('TTF=F')
-        res['JKM'], res['BRENT'] = get_s('JKM=F'), get_s('BZ=F')
-        return res
-    except: return {}
+    tickers = {"HH": "NG=F", "TTF": "TTF=F", "JKM": "JKM=F", "Oil": "BZ=F"}
+    data = {}
+    
+    for name, ticker in tickers.items():
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if not hist.empty:
+                current = hist['Close'].iloc[-1]
+                prev = hist['Close'].iloc[-2]
+                change = current - prev
+                data[name] = {"price": current, "change": change, "status": "Live"}
+            else:
+                data[name] = {"price": None, "change": 0, "status": "No Data"}
+        except Exception as e:
+            data[name] = {"price": None, "change": 0, "status": "Error"}
+            
+    # TTF 兜底逻辑
+    if (data["TTF"]["price"] is None or data["TTF"]["price"] == 0) and manual_ttf > 0:
+        data["TTF"] = {"price": manual_ttf, "change": 0, "status": "Manual"}
+        
+    return data
 
-# --- 2.2 EIA Storage (US) ---
-@st.cache_data(ttl=3600) # 缓存1小时
 def get_eia_storage(api_key):
-    if not api_key: return None
+    if not api_key:
+        return None, "Key Required"
+    
     url = "https://api.eia.gov/v2/natural-gas/stor/wkly/data/"
     params = {
         'api_key': api_key,
         'frequency': 'weekly',
         'data[0]': 'value',
-        'facets[series][]': 'NW2_EPG0_SWO_R48_BCF', # Lower 48 Total
+        'facets[series][]': 'NW2_EPG0_SWO_R48_BCF',
         'sort[0][column]': 'period',
         'sort[0][direction]': 'desc',
         'offset': 0,
-        'length': 5
+        'length': 2
+    }
+    
+    try:
+        r = requests.get(url, params=params)
+        data = r.json()
+        # 修复报错的关键：更安全的解析路径
+        if 'response' in data:
+            series_data = data['response']['data']
+        elif 'data' in data: # 有时候EIA直接返回data
+            series_data = data['data']
+        else:
+            return None, "Parse Error"
+
+        current = float(series_data[0]['value'])
+        prev = float(series_data[1]['value'])
+        change = current - prev
+        date = series_data[0]['period']
+        return {"current": current, "change": change, "date": date}, "OK"
+    except Exception as e:
+        return None, str(e)
+
+def get_gie_storage(api_key):
+    if not api_key:
+        return None, "Key Required"
+    
+    url = "https://agsi.gie.eu/api"
+    headers = {"x-key": api_key}
+    params = {'type': 'eu'}
+    
+    try:
+        r = requests.get(url, headers=headers, params=params)
+        data = r.json()
+        latest = data['data'][0]
+        return {
+            "full": float(latest['full']),
+            "volume": float(latest['gasInStorage']),
+            "date": latest['gasDayStart']
+        }, "OK"
+    except Exception as e:
+        return None, str(e)
+
+def get_weather():
+    # 使用 Open-Meteo 免费 API (无需 Key)
+    # Amsterdam (52.36, 4.90), Sabine Pass (29.73, -93.89)
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": [52.36, 29.73, 35.68], # AMS, Sabine, Tokyo
+        "longitude": [4.90, -93.89, 139.65],
+        "daily": "temperature_2m_max",
+        "timezone": "auto",
+        "forecast_days": 3
     }
     try:
         r = requests.get(url, params=params)
-        data = r.json()['response']['data']
-        # data[0] is latest, data[1] is previous
-        latest = float(data[0]['value'])
-        prev = float(data[1]['value'])
-        date = data[0]['period']
-        return {"val": latest, "delta": latest - prev, "date": date}
-    except Exception as e:
-        return {"error": str(e)}
+        data = r.json()
+        
+        # 简单解析未来3天平均最高温
+        ams_temp = sum(data[0]['daily']['temperature_2m_max']) / 3
+        us_temp = sum(data[1]['daily']['temperature_2m_max']) / 3
+        tokyo_temp = sum(data[2]['daily']['temperature_2m_max']) / 3
+        
+        return {"EU": ams_temp, "US": us_temp, "Asia": tokyo_temp}
+    except:
+        return {"EU": 0, "US": 0, "Asia": 0}
 
-# --- 2.3 GIE Storage (EU) ---
-@st.cache_data(ttl=3600)
-def get_gie_storage(api_key):
-    if not api_key: return None
-    url = "https://agsi.gie.eu/api"
-    headers = {"x-key": api_key}
-    params = {'type': 'eu'} # EU Aggregate
-    try:
-        r = requests.get(url, headers=headers, params=params)
-        data = r.json()['data'][0] # Latest day
-        return {
-            "full": float(data['full']),
-            "twh": float(data['gasInStorage']),
-            "date": data['gasDayStart']
-        }
-    except Exception as e:
-        return {"error": str(e)}
+# --- 主界面 ---
 
-# --- 2.4 Arbitrage Calc ---
-def calculate_arbitrage(hh, ttf):
-    if hh is None or ttf is None: return None, 0, False
-    df = pd.DataFrame({'HH': hh, 'TTF': ttf}).dropna()
-    if df.empty: return None, 0, False
-    df['Spread'] = (df['TTF'] * TTF_CONVERSION_FACTOR) - df['HH']
-    last = df['Spread'].iloc[-1]
-    return df, last, last > ARB_COST_ESTIMATE
+st.title("🚢 Global LNG Trading Dashboard V4.5")
+st.markdown("Real-time Intelligence & Arbitrage Monitor")
 
-# --- 2.5 News RSS ---
-@st.cache_data(ttl=600)
-def get_news():
-    sources = [
-        ("Reuters", "http://feeds.reuters.com/reuters/energyNews"),
-        ("OilPrice", "https://oilprice.com/rss/main"),
-        ("LNG Prime", "https://lngprime.com/feed/")
-    ]
-    news = []
-    for src, url in sources:
-        try:
-            feed = feedparser.parse(url)
-            for e in feed.entries[:3]:
-                dt = datetime.now()
-                if hasattr(e, 'published_parsed') and e.published_parsed:
-                    dt = datetime.fromtimestamp(mktime(e.published_parsed))
-                news.append({"src": src, "title": e.title, "link": e.link, "dt": dt})
-        except: continue
-    return sorted(news, key=lambda x: x['dt'], reverse=True)[:6]
+# 1. 库存与基本面
+st.subheader("1. Global Fundamentals (Storage & Weather)")
+col_s1, col_s2, col_s3 = st.columns(3)
 
-# ==========================================
-# 3. Main Dashboard Layout
-# ==========================================
-st.title("🚢 LNG Trading Dashboard V4.0 Pro")
-st.markdown("Real-time Pricing, Storage Fundamental & Arb Signals")
-
-# --- ROW 1: Global Storage Monitor (New) ---
-st.subheader("1. Global Storage Monitor (Fundamentals)")
-sc1, sc2 = st.columns(2)
-
-# US Storage
-with sc1:
-    if eia_key:
-        eia_data = get_eia_storage(eia_key)
-        if eia_data and "error" not in eia_data:
-            delta_symbol = "▲" if eia_data['delta'] >= 0 else "▼"
-            delta_color = "red" if eia_data['delta'] < 0 else "green" # draw is bullish(red?), build is bearish? standard green/red used here
-            st.markdown(f"""
-            <div class="storage-card">
-                <h4>🇺🇸 US Storage (EIA Lower 48)</h4>
-                <div style="font-size: 2em; font-weight: bold;">{eia_data['val']} <span style="font-size:0.5em">Bcf</span></div>
-                <div style="color: {delta_color}">
-                    {delta_symbol} {eia_data['delta']:.1f} Bcf vs prev week
-                </div>
-                <div style="font-size: 0.8em; color: gray; margin-top: 5px;">Period: {eia_data['date']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.error(f"EIA Error: {eia_data.get('error')}" if eia_data else "Failed to fetch")
+# EIA
+storage_us, status_us = get_eia_storage(eia_key)
+with col_s1:
+    if storage_us:
+        st.metric("🇺🇸 US Storage (EIA)", f"{storage_us['current']} Bcf", f"{storage_us['change']:.1f} Bcf")
+        st.caption(f"Date: {storage_us['date']}")
     else:
-        st.info("Waiting for EIA API Key... (Sidebar)")
+        st.warning(f"US Data: {status_us}")
 
-# EU Storage
-with sc2:
-    if gie_key:
-        gie_data = get_gie_storage(gie_key)
-        if gie_data and "error" not in gie_data:
-            # Color scale for fullness
-            full_color = "#28a745" if gie_data['full'] > 90 else "#ffc107"
-            st.markdown(f"""
-            <div class="storage-card" style="border-left-color: #ffc107;">
-                <h4>🇪🇺 EU Storage (GIE Aggregate)</h4>
-                <div style="font-size: 2em; font-weight: bold; color: {full_color};">
-                    {gie_data['full']:.2f}% <span style="font-size:0.5em; color:black">Full</span>
-                </div>
-                <div>Volume: <b>{gie_data['twh']:.1f}</b> TWh</div>
-                <div style="font-size: 0.8em; color: gray; margin-top: 5px;">Date: {gie_data['date']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.error(f"GIE Error: {gie_data.get('error')}" if gie_data else "Failed to fetch")
+# GIE
+storage_eu, status_eu = get_gie_storage(gie_key)
+with col_s2:
+    if storage_eu:
+        st.metric("🇪🇺 EU Storage (GIE)", f"{storage_eu['full']:.2f}% Full", f"{storage_eu['volume']:.1f} TWh")
+        st.caption(f"Date: {storage_eu['date']}")
     else:
-        st.info("Waiting for GIE API Key... (Sidebar)")
+        st.warning(f"EU Data: {status_eu}")
 
-st.markdown("---")
+# Weather
+weather = get_weather()
+with col_s3:
+    st.markdown("**🌡️ 3-Day Avg Temp**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Amsterdam", f"{weather['EU']:.1f}°C")
+    c2.metric("Sabine Pass", f"{weather['US']:.1f}°C")
+    c3.metric("Tokyo", f"{weather['Asia']:.1f}°C")
 
-# --- ROW 2: Price Matrix ---
+st.divider()
+
+# 2. 市场价格
 st.subheader("2. Market Prices & Macro")
 prices = get_market_data()
-pc1, pc2, pc3, pc4 = st.columns(4)
+col1, col2, col3, col4 = st.columns(4)
 
-def show_price(col, name, s, curr_sign):
-    with col:
-        if s is not None:
-            cur = s.iloc[-1]
-            chg = cur - (s.iloc[-2] if len(s)>1 else cur)
-            clr = "green" if chg>=0 else "red"
-            st.markdown(f"""
-            <div class="metric-container">
-                <div class="metric-label">{name}</div>
-                <div class="metric-value">{curr_sign}{cur:.2f}</div>
-                <div class="metric-sub" style="color:{clr}">{chg:+.2f}</div>
-            </div>""", unsafe_allow_html=True)
-        else:
-            st.warning(f"{name}: No Data")
+with col1:
+    p = prices["HH"]
+    st.metric("Henry Hub (US)", f"${p['price']:.3f}" if p['price'] else "N/A", f"{p['change']:.3f}" if p['price'] else None)
 
-show_price(pc1, "Henry Hub", prices.get('HH'), "$")
-show_price(pc2, "Dutch TTF", prices.get('TTF'), "€")
-show_price(pc3, "JKM (Asia)", prices.get('JKM'), "$")
-show_price(pc4, "Brent Oil", prices.get('BRENT'), "$")
+with col2:
+    p = prices["TTF"]
+    val = f"€{p['price']:.3f}" if p['price'] else "No Data"
+    delta = f"{p['change']:.3f}" if p['price'] else None
+    st.metric("Dutch TTF (EU)", val, delta, delta_color="normal" if p['status']=="Manual" else "normal")
+    if p['status'] == "Manual":
+        st.caption("⚠️ Manual Input")
+    elif p['status'] == "No Data":
+        st.caption("❌ Yahoo API Failed - Use Sidebar")
 
-st.markdown("---")
+with col3:
+    p = prices["JKM"]
+    st.metric("JKM (Asia)", f"${p['price']:.3f}" if p['price'] else "N/A", f"{p['change']:.3f}" if p['price'] else None)
 
-# --- ROW 3: Arbitrage Monitor ---
+with col4:
+    p = prices["Oil"]
+    st.metric("Brent Oil", f"${p['price']:.2f}" if p['price'] else "N/A", f"{p['change']:.2f}" if p['price'] else None)
+
+st.divider()
+
+# 3. 套利监视器
 st.subheader("3. US-EU Arbitrage Monitor")
-arb_df, arb_val, arb_open = calculate_arbitrage(prices.get('HH'), prices.get('TTF'))
 
-ac1, ac2 = st.columns([1, 3])
-with ac1:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if arb_open:
-        st.markdown(f"""
-        <div class="arb-box-open">
-            ✅ WINDOW OPEN<br>
-            Spread: ${arb_val:.2f}
-        </div>""", unsafe_allow_html=True)
+if prices["HH"]["price"] and prices["TTF"]["price"]:
+    hh_price = prices["HH"]["price"]
+    ttf_price_eur = prices["TTF"]["price"]
+    
+    # 简单的单位换算: 1 MWh approx 3.412 MMBtu, 汇率假设 EUR/USD = 1.05 (你可以写死或抓取)
+    fx_rate = 1.05
+    ttf_price_usd_mmbtu = (ttf_price_eur * fx_rate) / 3.412
+    
+    # 公式: Profit = (Sales - Discount) - (Cost + Toll + Freight)
+    sales_price = ttf_price_usd_mmbtu - 1.0 # DES discount
+    cost_price = (1.15 * hh_price) + liquefaction_cost + freight_cost
+    
+    spread = sales_price - cost_price
+    
+    c_arb1, c_arb2 = st.columns([1, 2])
+    
+    with c_arb1:
+        if spread > 0:
+            st.success(f"✅ ARB OPEN: ${spread:.2f}/MMBtu")
+        else:
+            st.error(f"❌ ARB CLOSED: ${spread:.2f}/MMBtu")
+        
+        st.info(f"""
+        **Calculation:**
+        TTF ($): {ttf_price_usd_mmbtu:.2f}
+        - Cost: {cost_price:.2f}
+        (HH*1.15 + {liquefaction_cost} + {freight_cost})
+        """)
+        
+    with c_arb2:
+        # 这里应该画图，简化起见先展示数据
+        st.bar_chart({"Netback Profit": spread})
+
+else:
+    st.warning("Waiting for Price Data (Check HH and TTF)")
+
+st.divider()
+
+# 4. AI 智能情报
+st.subheader("4. AI Intelligence (Gemini)")
+
+rss_urls = [
+    "http://feeds.reuters.com/reuters/energyNews",
+    "https://oilprice.com/rss/main",
+    "https://lngprime.com/feed/"
+]
+
+if st.button("🔄 Analyze Latest News"):
+    if not gemini_key:
+        st.error("Please enter Gemini API Key in Sidebar")
     else:
-        st.markdown(f"""
-        <div class="arb-box-closed">
-            ❌ WINDOW CLOSED<br>
-            Spread: ${arb_val:.2f}
-        </div>""", unsafe_allow_html=True)
-    
-    st.caption(f"Cost Basis: ${ARB_COST_ESTIMATE}/MMBtu")
-    
-    if ai_enabled and arb_df is not None:
-        if st.button("AI Strategy"):
-            with st.spinner("Analyzing..."):
-                prompt = f"Spread is ${arb_val:.2f}, Trend is {'Up' if arb_val > arb_df['Spread'].mean() else 'Down'}. Storage levels visible above. Advice for trader?"
-                model = genai.GenerativeModel('gemini-pro')
-                res = model.generate_content(prompt)
-                st.info(res.text)
-
-with ac2:
-    if arb_df is not None:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=arb_df.index, y=arb_df['Spread'], fill='tozeroy', name='Net Spread', line=dict(color='#1f77b4')))
-        fig.add_trace(go.Scatter(x=[arb_df.index[0], arb_df.index[-1]], y=[ARB_COST_ESTIMATE, ARB_COST_ESTIMATE], mode='lines', name='Cost', line=dict(dash='dash', color='orange')))
-        fig.update_layout(height=300, margin=dict(t=20, b=20, l=40, r=20), title="Spread vs Cost ($/MMBtu)")
-        st.plotly_chart(fig, use_container_width=True)
-
-# --- ROW 4: Intelligence ---
-st.subheader("4. Market Intelligence")
-news = get_news()
-nc1, nc2 = st.columns(2)
-for i, n in enumerate(news):
-    with (nc1 if i%2==0 else nc2):
-        st.markdown(f"""
-        <div class="news-item">
-            <b>{n['src']}</b> <span style="color:#888">| {n['dt'].strftime('%H:%M')}</span><br>
-            <a href="{n['link']}" target="_blank">{n['title']}</a>
-        </div>
-        """, unsafe_allow_html=True)
-
-st.markdown("<br><div style='text-align:center;color:#aaa'>LNG Dashboard V4.0 Pro | Built with Python Streamlit</div>", unsafe_allow_html=True)
+        news_items = []
+        for url in rss_urls:
+            try:
+                feed = feedparser.parse(url)
+                for entry in feed.entries[:2]:
+                    news_items.append(f"- {entry.title}")
+            except:
+                pass
+        
+        if news_items:
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel('gemini-pro')
+            
+            prompt = f"""
+            Act as a Senior LNG Trader. Analyze these news headlines and summarize the market sentiment in 3 bullet points. 
+            Identify if there are any supply disruptions or demand spikes.
+            
+            Headlines:
+            {"".join(news_items)}
+            """
+            
+            with st.spinner("Gemini is reading the news..."):
+                response = model.generate_content(prompt)
+                st.markdown(response.text)
+        else:
+            st.write("No news found.")
