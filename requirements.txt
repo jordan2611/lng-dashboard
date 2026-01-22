@@ -2,4 +2,6 @@ streamlit
 yfinance
 feedparser
 google-generativeai
+pandas
+plotly
 matplotlib
