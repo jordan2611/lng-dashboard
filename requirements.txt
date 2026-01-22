@@ -4,4 +4,7 @@ feedparser
 google-generativeai
 pandas
 plotly
-matplotlib
+requests
+openmeteo-requests
+requests-cache
+retry_requests
