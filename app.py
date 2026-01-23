@@ -237,4 +237,74 @@ else:
 # 注意：VesselFinder 免费版地图有时会被广告拦截插件(AdBlock)拦截，请确保关闭插件。
 map_html = f"""
 <div style="width: 100%; height: 450px; overflow: hidden; border-radius: 10px; border: 1px solid #ddd;">
-    <iframe name="vesself
+    <iframe name="vesselfinder" 
+    src="https://www.vesselfinder.com/aismap?zoom={zoom}&lat={lat}&lon={lon}&width=100%&height=450&names=true&mmsi=0&imo=0&sc_0=1&sc_1=1&sc_2=0&sc_3=0&sc_4=0&sc_5=1&sc_6=0&sc_7=0" 
+    width="100%" height="450" frameborder="0" allowfullscreen></iframe>
+</div>
+"""
+components.html(map_html, height=450)
+
+# 备用链接 (如果地图还是不显示)
+link_url = f"https://www.vesselfinder.com/?lat={lat}&lon={lon}&zoom={zoom}"
+st.markdown(f"[⚠️ Map not loading? Click here to view on VesselFinder]({link_url})")
+
+st.divider()
+
+# 5. AI 智能情报 (V5.5 完整版：链接+总结)
+st.subheader("4. Live Intelligence (Beijing Time)")
+
+user_query = st.text_input("💬 Filter News (e.g. 'Strikes'):")
+
+if st.button("🔄 Refresh News & Analyze") or user_query:
+    if not gemini_key:
+        st.error("Need Gemini Key")
+    else:
+        with st.spinner("🕷️ Updating Feed & Generating Summary..."):
+            news_items, fetch_log = fetch_news_headlines()
+            model_name = get_working_model(gemini_key)
+            
+            # 跑马灯填充
+            if news_items:
+                ticker_html = '<div class="ticker-wrap"><div class="ticker">'
+                for item in news_items[:10]:
+                    ticker_html += f'<div class="ticker-item">{item["time_str"]} {item["title"]}</div>'
+                ticker_html += '</div></div>'
+                ticker_placeholder.markdown(ticker_html, unsafe_allow_html=True)
+            
+            # AI 分析
+            if news_items:
+                genai.configure(api_key=gemini_key)
+                model = genai.GenerativeModel(model_name)
+                
+                news_text = ""
+                for item in news_items[:15]:
+                    news_text += f"Time: {item['time_str']} | Source: {item['source']} | Title: {item['title']} | URL: {item['link']}\n"
+                
+                # V5.5 Prompt
+                prompt = f"""
+                You are a Head of LNG Trading. Input Data (Newest First):
+                {news_text}
+                User Filter: {user_query if user_query else "None"}
+
+                Task 1: Detailed Table
+                Create a markdown table. 
+                **CRITICAL**: 'Headline' column MUST be a link: `[Title](URL)`.
+                Columns: Time (BJ), Source, Headline, Sentiment (📈/📉/➖), Impact(1-10), Key Takeaway.
+
+                Task 2: Global Market Sentiment Summary (CRITICAL)
+                Below table, write a section "### 🌍 Global Market Sentiment Summary".
+                Write a concise paragraph summarizing market direction (Bullish/Bearish) and biggest driver.
+                """
+                
+                response = model.generate_content(prompt)
+                st.markdown(response.text)
+                
+                with st.expander("📡 Source Log"):
+                    st.write(fetch_log)
+            else:
+                st.warning("No news fetched.")
+
+# 6. 天气 (Windy)
+st.divider()
+st.subheader("5. Live Weather (Windy)")
+components.iframe(src="https://embed.windy.com/embed2.html?lat=40.0&lon=-50.0&zoom=3&level=surface&overlay=temp&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1", height=450)
