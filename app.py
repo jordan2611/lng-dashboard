@@ -126,8 +126,10 @@ def fetch_news_headlines():
         ("CNBC Energy", "https://www.cnbc.com/id/19836768/device/rss/rss.html"),
         ("Rigzone", "https://www.rigzone.com/news/rss/rigzone_latest.aspx"),
         ("Gas World", "https://www.gasworld.com/feed/"),
-        ("Investing", "https://www.investing.com/rss/commodities.rss"),
-        ("NatGasIntel", "https://www.naturalgasintel.com/feed/"),
+        ("EIA Reports", "https://www.eia.gov/rss/naturalgas.xml"),
+        ("Investing.com", "https://www.investing.com/rss/commodities.rss"),
+        ("Offshore Energy", "https://www.offshore-energy.biz/feed/"),
+        ("Natural Gas Intel", "https://www.naturalgasintel.com/feed/"),
     ]
     news_items = []
     log = []
