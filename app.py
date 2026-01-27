@@ -135,7 +135,7 @@ def fetch_news_headlines():
         ("LNG Prime", "https://lngprime.com/feed/"),
         ("Gas World", "https://www.gasworld.com/feed/"),
         ("EIA Reports", "https://www.eia.gov/rss/naturalgas.xml"),
-        ("Natural Gas Intel", "https://www.naturalgasintel.com/feed/")
+        ("Natural Gas Intel", "https://www.naturalgasintel.com/feed/"),
         # 主流源
         ("OilPrice", "https://oilprice.com/rss/main"),
         ("Rigzone", "https://www.rigzone.com/news/rss/rigzone_latest.aspx"),
