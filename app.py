@@ -117,44 +117,84 @@ def get_gie_storage_analysis(api_key):
     except Exception as e:
         return None, str(e)
 
-# 新闻抓取 (保留 V5.5 的北京时间和链接)
+# --- 核心修复：更强的新闻抓取逻辑 ---
 def fetch_news_headlines():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"}
+    # 模拟真实浏览器 Headers (解决 NewsNow 403 问题)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Referer": "https://www.google.com/"
+    }
+    
+    # 精选的高质量 RSS 源 (替代不稳定的聚合源)
     sources = [
+        # 垂直行业核心源 (最稳定)
+        ("LNG Industry", "https://www.lngindustry.com/rss/lngindustry.rss"),
+        ("Global LNG Hub", "https://globallnghub.com/feed"),
+        ("LNG Global", "https://lngglobal.com/feed"),
         ("LNG Prime", "https://lngprime.com/feed/"),
-        ("OilPrice", "https://oilprice.com/rss/main"),
-        ("CNBC Energy", "https://www.cnbc.com/id/19836768/device/rss/rss.html"),
-        ("Rigzone", "https://www.rigzone.com/news/rss/rigzone_latest.aspx"),
         ("Gas World", "https://www.gasworld.com/feed/"),
         ("EIA Reports", "https://www.eia.gov/rss/naturalgas.xml"),
+        ("Natural Gas Intel", "https://www.naturalgasintel.com/feed/")
+        # 主流源
+        ("OilPrice", "https://oilprice.com/rss/main"),
+        ("Rigzone", "https://www.rigzone.com/news/rss/rigzone_latest.aspx"),
+        ("CNBC Energy", "https://www.cnbc.com/id/19836768/device/rss/rss.html"),
         ("Investing.com", "https://www.investing.com/rss/commodities.rss"),
         ("Offshore Energy", "https://www.offshore-energy.biz/feed/"),
-        ("Natural Gas Intel", "https://www.naturalgasintel.com/feed/"),
+        # 尝试 NewsNow (作为补充，如果不通会自动跳过)
+        ("NewsNow LNG", "https://www.newsnow.co.uk/h/Industry+Sectors/Energy/LNG?type=ln&fmt=rss")
     ]
+    
     news_items = []
     log = []
+    seen_titles = set()
+    
     for name, url in sources:
         try:
+            # 使用 requests 获取内容，并设置 4秒超时，防止卡顿
             resp = requests.get(url, headers=headers, timeout=4)
+            
             if resp.status_code == 200:
+                # 解析 XML
                 feed = feedparser.parse(resp.content)
-                for entry in feed.entries[:3]:
+                
+                # NewsNow 量大，取5条；其他精品源取3条
+                limit = 5 if "NewsNow" in name else 3
+                
+                for entry in feed.entries[:limit]:
+                    # 去重逻辑
+                    title_clean = entry.title.strip()
+                    if title_clean in seen_titles: continue
+                    seen_titles.add(title_clean)
+                    
+                    # 时间处理
                     try:
-                        if hasattr(entry, 'published_parsed'):
+                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
                             dt_utc = datetime.fromtimestamp(mktime(entry.published_parsed), timezone.utc)
                         else:
                             dt_utc = datetime.now(timezone.utc)
+                        # 转北京时间
                         dt_bj = dt_utc.astimezone(timezone(timedelta(hours=8)))
                         time_str = dt_bj.strftime("%m-%d %H:%M")
                     except:
-                        time_str = "Unknown"
+                        time_str = "Latest"
                         dt_bj = datetime.now()
-                    news_items.append({"source": name, "title": entry.title, "link": entry.link, "time_str": time_str, "dt_obj": dt_bj})
-                log.append(f"✅ {name}")
+                        
+                    news_items.append({
+                        "source": name,
+                        "title": title_clean,
+                        "link": entry.link,
+                        "time_str": time_str,
+                        "dt_obj": dt_bj
+                    })
+                log.append(f"✅ {name}: OK ({len(feed.entries)} items)")
             else:
-                log.append(f"⚠️ {name} ({resp.status_code})")
-        except:
-            log.append(f"❌ {name}")
+                log.append(f"⚠️ {name}: Blocked/Error (Status {resp.status_code})")
+        except Exception as e:
+            log.append(f"❌ {name}: Connection Failed")
+            
+    # 按时间倒序排列 (最新的在最前)
     news_items.sort(key=lambda x: x['dt_obj'].timestamp(), reverse=True)
     return news_items, log
 
@@ -164,8 +204,6 @@ def get_working_model(api_key):
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         for m in models: 
             if 'flash' in m.lower(): return m
-        for m in models: 
-            if 'gemini' in m.lower(): return m
         return "models/gemini-pro"
     except:
         return "models/gemini-pro"
