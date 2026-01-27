@@ -117,50 +117,28 @@ def get_gie_storage_analysis(api_key):
     except Exception as e:
         return None, str(e)
 
-# --- 更新后的新闻抓取函数 (支持 NewsNow + 去重) ---
+# 新闻抓取 (保留 V5.5 的北京时间和链接)
 def fetch_news_headlines():
-    # 伪装头 (NewsNow 对 User-Agent 很敏感，这个必须有)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"}
-    
     sources = [
-        # 1. NewsNow LNG (聚合源，量大，放在最前面)
-        ("NewsNow LNG", "https://www.newsnow.co.uk/h/Industry+Sectors/Energy/LNG?type=ln&fmt=rss"),
-        # 2. 垂直行业源
         ("LNG Prime", "https://lngprime.com/feed/"),
         ("OilPrice", "https://oilprice.com/rss/main"),
-        ("Reuters Energy", "http://feeds.reuters.com/reuters/energyNews"),
+        ("CNBC Energy", "https://www.cnbc.com/id/19836768/device/rss/rss.html"),
         ("Rigzone", "https://www.rigzone.com/news/rss/rigzone_latest.aspx"),
         ("Gas World", "https://www.gasworld.com/feed/"),
-        ("NatGasIntel", "https://www.naturalgasintel.com/feed/"),
+        ("EIA Reports", "https://www.eia.gov/rss/naturalgas.xml"),
+        ("Investing.com", "https://www.investing.com/rss/commodities.rss"),
+        ("Offshore Energy", "https://www.offshore-energy.biz/feed/"),
+        ("Natural Gas Intel", "https://www.naturalgasintel.com/feed/"),
     ]
-    
     news_items = []
     log = []
-    seen_titles = set() # 用于去重：记录已经出现过的标题
-    
     for name, url in sources:
         try:
-            # NewsNow 必须用 requests 获取内容，不能直接用 feedparser 远程抓
-            resp = requests.get(url, headers=headers, timeout=5)
-            
+            resp = requests.get(url, headers=headers, timeout=4)
             if resp.status_code == 200:
                 feed = feedparser.parse(resp.content)
-                
-                # NewsNow 的量很大，我们稍微多取一点，然后去重
-                limit = 5 if "NewsNow" in name else 3
-                
-                for entry in feed.entries[:limit]:
-                    # --- 智能去重逻辑 ---
-                    # 很多新闻标题大同小异，我们取前15个字符做指纹，或者直接对比全标题
-                    # 比如 "Gas Prices Soar" 和 "Gas Prices Soar in Europe"
-                    clean_title = entry.title.strip()
-                    
-                    if clean_title in seen_titles:
-                        continue # 如果遇到重复的，直接跳过
-                    
-                    seen_titles.add(clean_title)
-                    
-                    # --- 时间处理 ---
+                for entry in feed.entries[:3]:
                     try:
                         if hasattr(entry, 'published_parsed'):
                             dt_utc = datetime.fromtimestamp(mktime(entry.published_parsed), timezone.utc)
@@ -169,25 +147,29 @@ def fetch_news_headlines():
                         dt_bj = dt_utc.astimezone(timezone(timedelta(hours=8)))
                         time_str = dt_bj.strftime("%m-%d %H:%M")
                     except:
-                        time_str = "Recent"
+                        time_str = "Unknown"
                         dt_bj = datetime.now()
-                    
-                    news_items.append({
-                        "source": name,
-                        "title": entry.title,
-                        "link": entry.link,
-                        "time_str": time_str,
-                        "dt_obj": dt_bj
-                    })
+                    news_items.append({"source": name, "title": entry.title, "link": entry.link, "time_str": time_str, "dt_obj": dt_bj})
                 log.append(f"✅ {name}")
             else:
                 log.append(f"⚠️ {name} ({resp.status_code})")
-        except Exception as e:
+        except:
             log.append(f"❌ {name}")
-    
-    # 按时间排序
     news_items.sort(key=lambda x: x['dt_obj'].timestamp(), reverse=True)
     return news_items, log
+
+def get_working_model(api_key):
+    genai.configure(api_key=api_key)
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        for m in models: 
+            if 'flash' in m.lower(): return m
+        for m in models: 
+            if 'gemini' in m.lower(): return m
+        return "models/gemini-pro"
+    except:
+        return "models/gemini-pro"
+
 # --- 主界面 ---
 
 st.title("🚢 Global LNG Trading Desk V6.1")
