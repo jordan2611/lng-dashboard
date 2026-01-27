@@ -220,35 +220,59 @@ if prices['HH']['price'] > 0 and prices['TTF']['price'] > 0:
 
 st.divider()
 
-# 4. 港口雷达 (Port Radar) - 修复版
+# 4. 港口雷达 (Port Radar) - JS 注入修复版
 st.subheader("3. Strategic Port Radar (Live Ships)")
-st.caption("Tracking LNG Tankers at Key Chokepoints")
+st.caption("Tracking LNG Tankers at Key Chokepoints (Official Widget)")
 
 port_option = st.selectbox("Select Radar View:", ["🇺🇸 Sabine Pass (US Export)", "🇳🇱 Rotterdam (EU Import)", "🇯🇵 Tokyo Bay (Asia Import)"])
 
-# 修复：使用更稳健的嵌入方式，强制HTTPS，并增加高度容器
+# 设置坐标参数
 if "Sabine" in port_option:
-    # 调整坐标到 Sabine Pass 航道入口
-    lat, lon, zoom = 29.7, -93.85, 10
+    lat, lon, zoom = 29.70, -93.85, 10
 elif "Rotterdam" in port_option:
     lat, lon, zoom = 51.95, 4.05, 9
-else:
-    lat, lon, zoom = 35.5, 139.8, 9
+else: # Tokyo
+    lat, lon, zoom = 35.50, 139.80, 9
 
-# 使用 components.html 并强制定义高度，避免被浏览器压缩为0
-# 注意：VesselFinder 免费版地图有时会被广告拦截插件(AdBlock)拦截，请确保关闭插件。
-map_html = f"""
-<div style="width: 100%; height: 450px; overflow: hidden; border-radius: 10px; border: 1px solid #ddd;">
-    <iframe name="vesselfinder" 
-    src="https://www.vesselfinder.com/aismap?zoom={zoom}&lat={lat}&lon={lon}&width=100%&height=450&names=true&mmsi=0&imo=0&sc_0=1&sc_1=1&sc_2=0&sc_3=0&sc_4=0&sc_5=1&sc_6=0&sc_7=0" 
-    width="100%" height="450" frameborder="0" allowfullscreen></iframe>
-</div>
+# --- 核心修复：使用 JavaScript 嵌入 (比 iframe 更稳) ---
+# 这是 VesselFinder 官方提供的标准嵌入代码，兼容性更好
+vesselfinder_html = f"""
+    <div style="width:100%; height:450px; border:1px solid #ccc; border-radius:10px; overflow:hidden;">
+        <script type="text/javascript">
+            width='100%';          // 宽度
+            height='450';          // 高度
+            border='0';            // 边框
+            shownames='true';      // 显示船名
+            latitude='{lat}';      // 动态纬度
+            longitude='{lon}';     // 动态经度
+            zoom='{zoom}';         // 缩放级别
+            maptype='1';           // 地图类型 (1=普通地图)
+            trackvessel='0';       // 不追踪特定船只
+            fleet='';              // 不显示特定船队
+        </script>
+        <script type="text/javascript" src="https://www.vesselfinder.com/aismap.js"></script>
+    </div>
 """
-components.html(map_html, height=450)
 
-# 备用链接 (如果地图还是不显示)
+# 使用 components.html 渲染这段 JS
+components.html(vesselfinder_html, height=450)
+
+# 备用方案：如果还是加载不出来，提供一个漂亮的跳转按钮
 link_url = f"https://www.vesselfinder.com/?lat={lat}&lon={lon}&zoom={zoom}"
-st.markdown(f"[⚠️ Map not loading? Click here to view on VesselFinder]({link_url})")
+st.markdown(f"""
+    <div style="text-align: center; margin-top: 10px;">
+        <a href="{link_url}" target="_blank" style="
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #0068c9;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;">
+            🚀 Map blocked? Click to open VesselFinder directly
+        </a>
+    </div>
+""", unsafe_allow_html=True)
 
 st.divider()
 
